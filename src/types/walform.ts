@@ -1,0 +1,63 @@
+export type SessionFieldType = 'text' | 'email' | 'url' | 'textarea' | 'checkbox' | 'select' | 'file' | 'rating';
+export type SubmissionStatus = 'new' | 'reviewing' | 'done' | 'rejected' | 'pending' | 'approved';
+
+export interface SessionField {
+  id: string;
+  label: string;
+  type: SessionFieldType;
+  required: boolean;
+  enabled: boolean;
+  helpText?: string;
+  description?: string; // field-level description shown below label
+  placeholder?: string;
+  options?: string[];   // for select
+  linkText?: string;
+  linkUrl?: string;
+  attachedCheckbox?: { id: string; label: string; }; // for checkboxes attached to an input field
+}
+
+export interface FormConfig {
+  type?: 'form'; // Discriminator for Walrus blob scanning
+  id: string;
+  title: string;
+  description: string;
+  fields: SessionField[];
+  sessionCount: number;  // how many session options
+  admins: string[];
+  createdAt: number;
+  publishedBlobId?: string;
+  publishedSuiObjectId?: string; // Sui Form object ID (used as formId in /f/?formId=)
+  publishedBy?: string; // ownerWallet
+  encryptionEnabled?: boolean; // Seal encryption flag
+  sealPublicKeyJwk?: any;      // RSA Public Key for encryption
+  sealedPrivateKey?: string;   // RSA Private Key (encrypted with admin signature)
+}
+
+export interface Submission {
+  type?: 'submission'; // Discriminator for Walrus blob scanning
+  id: string;
+  formId: string;
+  formBlobId: string;
+  parentFormBlobId?: string; // Explicit parent link
+  data: Record<string, string | string[] | boolean>;
+  submitterAddress?: string;
+  signature?: string;
+  timestamp: number;
+  blobId?: string;
+  suiObjectId?: string;
+  status: string;
+  adminNotes?: string;
+  note?: string;
+}
+
+// Walrus API response shape
+export interface WalrusUploadResponse {
+  blobId: string;
+  objectId: string;
+  endEpoch?: number;
+  success?: boolean;
+  url?: string;
+}
+
+// Re-export for legacy compat
+export type { WalrusUploadResponse as WalrusResponse };

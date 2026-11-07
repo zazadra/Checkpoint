@@ -1,0 +1,693 @@
+'use client';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import type { Submission, SubmissionStatus } from '@/types/walform';
+import { readJsonFromWalrus, getWalrusScanUrl, uploadJsonToWalrus, getWalrusBlobUrl } from '@/lib/walrus';
+import { dAppKit } from '@/app/dapp-kit';
+import { getSubIds, getAllSubIds } from '@/lib/fields';
+import { getIndexedBlobIds, onNewSubmission } from '@/lib/submission-index';
+import { getCachedFormIds } from '@/lib/form-registry';
+import { getOwnedSubmissions } from '@/lib/walrus-onchain';
+import { motion, AnimatePresence } from 'framer-motion';
+import type { FormConfig } from '@/types/walform';
+import dynamic from 'next/dynamic';
+
+const MyFormsTab = dynamic(() => import('@/components/admin/MyFormsTab').then(m=>m.MyFormsTab), { ssr:false });
+
+function shorten(a: string) { return `${a.slice(0,6)}-${a.slice(-4)}`; }
+
+const STATUS_COLORS: Record<string, string> = {
+  new: '#60a5fa', reviewing: '#fbbf24', done: '#4ade80', rejected: '#f87171',
+};
+
+function exportCSV(subs: Submission[]) {
+  if (!subs.length) return;
+  const dataKeys = [...new Set(subs.flatMap(s => Object.keys(s.data)))];
+  const headers = ['Submission ID', 'Timestamp', 'Submitter Address', 'Status', ...dataKeys];
+  const escape = (val: any) => {
+    const str = Array.isArray(val) ? val.join('; ') : String(val ?? '');
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+  const csvRows = [
+    headers.map(h => `"${h}"`).join(','),
+    ...subs.map(s => [
+      `"${s.id}"`,
+      `"${new Date(s.timestamp).toISOString()}"`,
+      `"${s.submitterAddress || ''}"`,
+      `"${s.status}"`,
+      ...dataKeys.map(k => escape(s.data[k]))
+    ].join(','))
+  ];
+  const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `walform-submissions-${new Date().toISOString().split('T')[0]}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+interface SubmissionsTabProps {
+  /** Connected wallet address - used to scan on-chain blob ownership */
+  ownerAddress: string;
+  /** Currently published form blob ID - used as default filter hint, but can be cleared */
+  formBlobId?: string;
+  /** Callback to switch to form builder */
+  onSelectForm?: (config: FormConfig) => void;
+  onShowToast?: (msg: string, type?: 'success' | 'error') => void;
+}
+
+type InternalTab = 'manager' | 'replies' | 'lookup';
+
+export function SubmissionsTab({ ownerAddress, formBlobId: initialFormBlobId, onSelectForm, onShowToast }: SubmissionsTabProps) {
+  const [internalTab, setInternalTab] = useState<InternalTab>(initialFormBlobId ? 'replies' : 'manager');
+  const [selectedFormId, setSelectedFormId] = useState<string | null>(initialFormBlobId && initialFormBlobId !== 'default' ? initialFormBlobId : null);
+  const [selectedForm, setSelectedForm] = useState<FormConfig | null>(null);
+
+  const [subs, setSubs]         = useState<Submission[]>([]);
+  const [loading, setLoading]   = useState(true);
+  const [syncing, setSyncing]   = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [filter, setFilter]     = useState<SubmissionStatus | 'all'>('all');
+  const [notes, setNotes]       = useState<Record<string, string>>({});
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  
+  const [searchBlobId, setSearchBlobId] = useState('');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResult, setSearchResult] = useState<any>(null);
+  const [searchError, setSearchError] = useState('');
+
+  const loadedIdsRef = useRef<Set<string>>(new Set());
+
+  // -- Sync from Sui directly ------------------------------
+  const syncFromChain = useCallback(async (isAuto = false) => {
+    if (typeof window === 'undefined' || !ownerAddress) return;
+    if (!isAuto) setSyncing(true);
+
+    try {
+      // Pass selectedFormId (which is the Sui object ID for forms) to filter
+      const onchainSubs = await getOwnedSubmissions(ownerAddress, selectedFormId || undefined);
+      
+      const parsedSubs: Submission[] = [];
+      for (const sub of onchainSubs) {
+        try {
+          const s = JSON.parse(sub.payloadJson) as Submission;
+          // Merge metadata
+          parsedSubs.push({
+            ...s,
+            suiObjectId: sub.suiObjectId,
+            timestamp: sub.timestamp || s.timestamp,
+            status: sub.status || s.status || 'new',
+            submitterAddress: sub.submitter || s.submitterAddress
+          });
+          loadedIdsRef.current.add(sub.suiObjectId);
+        } catch (e) {
+          console.warn('[Sync] Failed to parse payloadJson for submission', sub.suiObjectId);
+        }
+      }
+
+      if (parsedSubs.length > 0) {
+        setSubs(prev => {
+          const combined = [...prev, ...parsedSubs];
+          const seen = new Set<string>();
+          const deduped = combined.filter(s => {
+            // Using suiObjectId or id as uniqueness
+            const key = (s as any).suiObjectId || s.id;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          return deduped.sort((a, b) => b.timestamp - a.timestamp);
+        });
+      }
+    } catch (e) {
+      console.error('[Sync] Sui sync failed:', e);
+    }
+
+    setSyncing(false);
+  }, [ownerAddress, selectedFormId]);
+
+  const loadFromIndex = useCallback(async () => {
+    // Left empty for compatibility, Sui loads fast enough.
+  }, []);
+
+
+  // -- Initial load ----------------------------------------------------
+  const fullLoad = useCallback(async () => {
+    setLoading(true);
+    loadedIdsRef.current = new Set();
+    setSubs([]);
+    await syncFromChain();
+    setLoading(false);
+  }, [syncFromChain]);
+
+  useEffect(() => { 
+    fullLoad(); 
+    // Auto-refresh every 10s
+    const interval = setInterval(() => {
+      syncFromChain(true);
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [fullLoad, syncFromChain]);
+
+  // -- BroadcastChannel: instant new submission from same-browser tabs -
+  useEffect(() => {
+    const unsub = onNewSubmission(async (blobId) => {
+      if (loadedIdsRef.current.has(blobId)) return;
+      try {
+        const s = await readJsonFromWalrus<Submission>(blobId);
+        if (!s?.status) return;
+        const sub = { ...s, blobId: s.blobId ?? blobId };
+        loadedIdsRef.current.add(blobId);
+        // If we are filtering by a specific form, apply that filter
+        if (selectedFormId && (sub.formId !== selectedFormId && sub.formBlobId !== selectedFormId)) return;
+        setSubs(prev => {
+          if (prev.some(x => x.id === sub.id)) return prev;
+          return [sub, ...prev].sort((a, b) => b.timestamp - a.timestamp);
+        });
+      } catch { /* ignore */ }
+    });
+    return unsub;
+  }, [selectedFormId]);
+
+  // -- Optimistic status update ----------------------------------------
+  async function updateStatus(sub: Submission, status: SubmissionStatus) {
+    const updated = { ...sub, status, adminNotes: notes[sub.id] ?? sub.adminNotes ?? '' };
+    setSubs(prev => prev.map(s => s.id === sub.id ? updated : s));
+    setUpdatingId(sub.id);
+    try {
+      const signer = {
+        address: ownerAddress,
+        signAndExecute: async (transaction: unknown) => {
+          const result = await dAppKit.signAndExecuteTransaction({ transaction: transaction as any });
+          // dAppKit v2 returns { $kind, Transaction: { digest } }
+          const digest = (result as any)?.Transaction?.digest ?? (result as any)?.digest;
+          if (!digest) throw new Error('Wallet signing failed or was cancelled');
+          return { digest };
+        },
+      };
+      await uploadJsonToWalrus(updated, signer, 3);
+    } catch {
+      setSubs(prev => prev.map(s => s.id === sub.id ? sub : s));
+      if (onShowToast) onShowToast('Failed to save status update. Please try again.', 'error');
+      else alert('Failed to save status update. Please try again.');
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  const filtered = subs.filter(s => filter === 'all' || s.status === filter);
+  const isShowingAll = !selectedFormId;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+
+      {/* Internal Tabs */}
+      <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid var(--border)', paddingBottom: '16px', marginBottom: '8px' }}>
+        <button 
+          className={`btn btn-sm ${internalTab === 'manager' ? 'btn-primary' : 'btn-ghost'}`} 
+          onClick={() => setInternalTab('manager')}
+          style={{ borderRadius: '10px', height: '36px', padding: '0 16px' }}
+        >
+          Forms List
+        </button>
+        <button 
+          className={`btn btn-sm ${internalTab === 'replies' ? 'btn-primary' : 'btn-ghost'}`} 
+          onClick={() => setInternalTab('replies')}
+          style={{ borderRadius: '10px', height: '36px', padding: '0 16px' }}
+        >
+          Submission Replies
+        </button>
+        <button 
+          className={`btn btn-sm ${internalTab === 'lookup' ? 'btn-primary' : 'btn-ghost'}`} 
+          onClick={() => setInternalTab('lookup')}
+          style={{ borderRadius: '10px', height: '36px', padding: '0 16px' }}
+        >
+          Blob Explorer
+        </button>
+      </div>
+
+      {internalTab === 'manager' && (
+        <MyFormsTab 
+          ownerAddress={ownerAddress} 
+          onSelectForm={(cfg) => {
+            if (onSelectForm) onSelectForm(cfg);
+          }} 
+          onSelectSubmissions={(blobId) => {
+            setSelectedFormId(blobId);
+            setInternalTab('replies');
+          }} 
+        />
+      )}
+
+      {internalTab === 'lookup' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div className="card-premium" style={{ padding: '32px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div>
+              <h3 style={{ fontSize: '20px', fontWeight: 800, marginBottom: '4px' }}>Blob Explorer</h3>
+              <p style={{ fontSize: '14px', color: 'var(--text-3)' }}>Paste any Walrus Blob ID to retrieve and inspect its on-chain data.</p>
+            </div>
+            
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <input
+                className="input"
+                placeholder="Enter Walrus Blob ID (e.g. xyz123...)"
+                value={searchBlobId}
+                onChange={e => setSearchBlobId(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    setSearchError('');
+                    setSearchLoading(true);
+                    setSearchResult(null);
+
+                    const localSub = subs.find(s => (s.blobId === searchBlobId.trim()) || (s.id === searchBlobId.trim()));
+                    if (localSub) {
+                      setSearchResult(localSub);
+                      setSearchLoading(false);
+                      return;
+                    }
+
+                    readJsonFromWalrus<any>(searchBlobId.trim())
+                      .then(obj => {
+                        if (!obj) throw new Error('Blob empty or not found');
+                        // Tag it so we know what it is
+                        if (Array.isArray(obj.fields)) {
+                          (obj as any)._type = 'form';
+                        } else {
+                          (obj as any)._type = 'submission';
+                        }
+                        setSearchResult({ ...obj, blobId: obj.blobId ?? searchBlobId.trim() });
+                      })
+                      .catch(err => setSearchError(err.message || 'Failed to load submission. It may still be propagating.'))
+                      .finally(() => setSearchLoading(false));
+                  }
+                }}
+                style={{ flex: 1, fontFamily: 'var(--mono)', fontSize: '14px', height: '48px' }}
+              />
+              <button 
+                className="btn btn-primary" 
+                onClick={() => {
+                  setSearchError('');
+                  setSearchLoading(true);
+                  setSearchResult(null);
+
+                  const localSub = subs.find(s => (s.blobId === searchBlobId.trim()) || (s.id === searchBlobId.trim()));
+                  if (localSub) {
+                    setSearchResult(localSub);
+                    setSearchLoading(false);
+                    return;
+                  }
+
+                  readJsonFromWalrus<any>(searchBlobId.trim())
+                    .then(obj => {
+                      if (!obj) throw new Error('Blob empty or not found');
+                      if (Array.isArray(obj.fields)) {
+                         (obj as any)._type = 'form';
+                      } else {
+                         (obj as any)._type = 'submission';
+                      }
+                      setSearchResult({ ...obj, blobId: obj.blobId ?? searchBlobId.trim() });
+                    })
+                    .catch(err => setSearchError(err.message || 'Failed to load submission. It may still be propagating.'))
+                    .finally(() => setSearchLoading(false));
+                }}
+                disabled={searchLoading || !searchBlobId.trim()}
+                style={{ height: '48px', padding: '0 24px' }}
+              >
+                {searchLoading ? 'Scanning...' : 'Fetch Data'}
+              </button>
+            </div>
+            {searchError && <p style={{ color: 'var(--error)', fontSize: '13px' }}>⚠ {searchError}</p>}
+          </div>
+
+          {searchResult && (
+            <div className="card-premium" style={{ padding: '24px', borderLeft: `4px solid ${searchResult?.fields ? 'var(--accent)' : STATUS_COLORS[((searchResult as any)?.status || 'pending') as SubmissionStatus]}` }}>
+               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
+                 <div>
+                   <p style={{ fontSize: '12px', color: 'var(--text-3)' }}>{searchResult?.fields ? 'Form Title' : 'Submission ID'}</p>
+                   <p style={{ fontWeight: 700 }}>{searchResult?.title || (searchResult?.id ? shorten(searchResult.id) : 'Untitled')}</p>
+                 </div>
+                 <div style={{ textAlign: 'right' }}>
+                   <p style={{ fontSize: '12px', color: 'var(--text-3)' }}>Type</p>
+                   <span style={{ 
+                     display: 'inline-block', padding: '4px 10px', borderRadius: '20px', 
+                     fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em',
+                     backgroundColor: 'rgba(255,255,255,0.05)', color: 'var(--text-1)'
+                   }}>
+                     {(searchResult as any)._type || 'Blob'}
+                   </span>
+                 </div>
+               </div>
+               
+               <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
+                 {searchResult.fields ? (
+                   <div>
+                     <p style={{ fontSize: '14px', color: 'var(--text-2)', marginBottom: '12px' }}>{searchResult.description}</p>
+                     <div style={{ fontSize: '12px', color: 'var(--text-3)' }}>
+                       {searchResult.fields.length} Fields defined
+                     </div>
+                   </div>
+                 ) : (
+                   Object.entries((searchResult as any).data || {}).map(([key, val]) => (
+                     <div key={key} style={{ marginBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '12px' }}>
+                       <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--accent-2)', textTransform: 'uppercase', marginBottom: '6px' }}>{key}</p>
+                       {Array.isArray(val) ? (
+                         <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '14px', color: 'var(--text-1)' }}>
+                           {val.map((v, i) => <li key={i}>{String(v)}</li>)}
+                         </ul>
+                       ) : (
+                         <p style={{ margin: 0, fontSize: '14px', color: 'var(--text-1)' }}>{String(val || '')}</p>
+                       )}
+                     </div>
+                   ))
+                 )}
+               </div>
+
+               <div style={{ display: 'flex', gap: '8px' }}>
+                 {searchResult.blobId && (
+                   <a href={getWalrusScanUrl(searchResult.blobId)} target="_blank" rel="noopener noreferrer"
+                     className="btn btn-secondary btn-sm" style={{ textDecoration: 'none' }}>
+                     Walrus Scan ↗
+                   </a>
+                 )}
+                 {searchResult.fields && (
+                   <button className="btn btn-primary btn-sm" onClick={() => onSelectForm?.(searchResult as FormConfig)}>
+                     Open in Builder
+                   </button>
+                 )}
+               </div>
+             </div>
+          )}
+        </div>
+      )}
+
+      {internalTab === 'replies' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          {selectedFormId ? (
+            <>
+              {/* Form Header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <button className="btn btn-icon" onClick={() => setSelectedFormId(null)} title="Back to Manager">←</button>
+                  <div>
+                    <h3 style={{ fontSize: '20px', fontWeight: 800 }}>{selectedForm?.title || 'Untitled Form'}</h3>
+                    <p style={{ fontSize: '13px', color: 'var(--text-3)' }}>{shorten(selectedFormId)} • {subs.filter(s => s.formId === selectedFormId).length} Replies</p>
+                  </div>
+                </div>
+                
+                {/* Search in Replies */}
+                <div style={{ display: 'flex', gap: '8px', minWidth: '300px' }}>
+                  <input
+                    className="input"
+                    placeholder="Filter by Submission ID..."
+                    style={{ fontSize: '13px', height: '36px' }}
+                    value={searchBlobId}
+                    onChange={(e) => setSearchBlobId(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {/* Status Filter */}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+                {(['all', 'new', 'reviewing', 'done', 'rejected'] as const).map(s => (
+                  <button 
+                    key={s} 
+                    className={`btn btn-sm ${filter === s ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setFilter(s)}
+                    style={{ 
+                      fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', 
+                      minWidth: '100px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center' 
+                    }}
+                  >
+                    {s}
+                    <span style={{ marginLeft: '6px', opacity: 0.6 }}>
+                      ({s === 'all' ? subs.filter(x => x.formId === selectedFormId).length : subs.filter(x => x.formId === selectedFormId && x.status === s).length})
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Submissions List */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <AnimatePresence mode="popLayout">
+                {subs
+                  .filter(s => s.formId === selectedFormId)
+                  .filter(s => filter === 'all' || s.status === filter)
+                  .filter(s => !searchBlobId || s.id.includes(searchBlobId.trim()) || (s.blobId && s.blobId.includes(searchBlobId.trim())))
+                  .sort((a, b) => b.timestamp - a.timestamp)
+                  .map(s => (
+                    <motion.div 
+                      layout
+                      key={s.id} 
+                      className="card-premium" 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      style={{ 
+                        padding: 0, overflow: 'hidden', 
+                        border: expanded === s.id ? '1px solid var(--accent-soft)' : '1px solid var(--border)',
+                        boxShadow: expanded === s.id ? '0 12px 40px -10px rgba(139, 92, 246, 0.2)' : 'none',
+                        transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                        marginBottom: '12px'
+                      }}
+              >
+                {/* Header */}
+                <div 
+                  style={{ display: 'flex', alignItems: 'center', gap: '20px', padding: '20px 24px', cursor: 'pointer' }}
+                  onClick={() => setExpanded(e => e === s.id ? null : s.id)}
+                >
+                  <div style={{ 
+                    width: 40, height: 40, borderRadius: 12, 
+                    background: `${STATUS_COLORS[s.status]}10`, 
+                    border: `1px solid ${STATUS_COLORS[s.status]}30`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0 
+                  }}>
+                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: STATUS_COLORS[s.status], boxShadow: `0 0 10px ${STATUS_COLORS[s.status]}` }} />
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '2px' }}>
+                      <p style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-1)', letterSpacing: '-0.01em' }}>
+                        {(s.data.project_name as string) || (s.data.name as string) || 'Untitled Submission'}
+                      </p>
+                      {s.data.session_select && (
+                        <span style={{ fontSize: '10px', fontWeight: 800, padding: '2px 8px', borderRadius: '4px', background: 'var(--accent-soft)', color: 'var(--accent-2)', textTransform: 'uppercase' }}>
+                          {s.data.session_select as string}
+                        </span>
+                      )}
+                    </div>
+                    <p style={{ fontSize: '12px', color: 'var(--text-3)', fontWeight: 500 }}>
+                      {s.submitterAddress ? shorten(s.submitterAddress) : 'Anonymous'}
+                      <span style={{ margin: '0 8px', opacity: 0.3 }}>-</span>
+                      {new Date(s.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                      {s.formBlobId && (
+                        <>
+                          <span style={{ margin: '0 8px', opacity: 0.3 }}>-</span>
+                          <span style={{ fontFamily:'var(--mono)', fontSize:'10px', color:'var(--text-3)' }}>
+                            form: {s.formBlobId.slice(0,10)}-
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    <span style={{
+                      fontSize: '10px', fontWeight: 800, padding: '4px 12px', borderRadius: '6px', flexShrink: 0,
+                      background: `${STATUS_COLORS[s.status]}15`, color: STATUS_COLORS[s.status],
+                      border: `1px solid ${STATUS_COLORS[s.status]}25`,
+                      textTransform: 'uppercase', letterSpacing: '0.05em'
+                    }}>
+                      {s.status}
+                    </span>
+                    <div style={{ 
+                      color: 'var(--text-3)', transition: 'transform 0.3s', 
+                      transform: expanded === s.id ? 'rotate(180deg)' : 'none' 
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Detail */}
+                {expanded === s.id && (
+                  <div style={{ padding: '0 24px 24px' }}>
+                    {/* Actions Section - Moved to top to prevent scrolling */}
+                    <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      <div style={{ position: 'relative' }}>
+                        <label className="input-label" style={{ fontSize: '11px', fontWeight: 800, color: 'var(--text-3)', textTransform: 'uppercase', marginBottom: '8px', display: 'block' }}>Admin Evaluation</label>
+                        <textarea 
+                          className="textarea" 
+                          rows={3} 
+                          placeholder="Add internal feedback or decision notes..."
+                          value={notes[s.id] ?? s.adminNotes ?? ''}
+                          onChange={e => setNotes(n => ({ ...n, [s.id]: e.target.value }))}
+                          style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: '12px' }}
+                        />
+                      </div>
+                      
+                      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                        <button
+                          className="btn btn-sm"
+                          style={{ 
+                            background: 'rgba(96, 165, 250, 0.08)', color: '#60a5fa', border: '1px solid rgba(96, 165, 250, 0.2)', 
+                            flex: 1, minWidth: '120px', height: '44px', fontWeight: 800, borderRadius: '12px', textTransform: 'uppercase', fontSize: '11px'
+                          }}
+                          onClick={() => updateStatus(s, 'reviewing')}
+                          disabled={updatingId === s.id}
+                        >
+                          {updatingId === s.id ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : 'Mark Reviewing'}
+                        </button>
+                        <button
+                          className="btn btn-sm"
+                          style={{ 
+                            background: 'rgba(74, 222, 128, 0.08)', color: '#4ade80', border: '1px solid rgba(74, 222, 128, 0.2)', 
+                            flex: 1, minWidth: '120px', height: '44px', fontWeight: 800, borderRadius: '12px', textTransform: 'uppercase', fontSize: '11px'
+                          }}
+                          onClick={() => updateStatus(s, 'done')}
+                          disabled={updatingId === s.id}
+                        >
+                          {updatingId === s.id ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : 'Mark Done'}
+                        </button>
+                        <button
+                          className="btn btn-sm"
+                          style={{ 
+                            background: 'rgba(248, 113, 113, 0.08)', color: '#f87171', border: '1px solid rgba(248, 113, 113, 0.2)', 
+                            flex: 1, minWidth: '120px', height: '44px', fontWeight: 800, borderRadius: '12px', textTransform: 'uppercase', fontSize: '11px'
+                          }}
+                          onClick={() => updateStatus(s, 'rejected')}
+                          disabled={updatingId === s.id}
+                        >
+                          {updatingId === s.id ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : 'Reject'}
+                        </button>
+                        {s.blobId && (
+                          <a href={getWalrusScanUrl(s.blobId)} target="_blank" rel="noopener noreferrer"
+                            className="btn btn-secondary btn-sm" style={{ textDecoration: 'none', width: 'auto', display: 'flex', alignItems: 'center', borderRadius: '12px' }}>
+                            Walrus Scan
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={{ 
+                      display: 'flex', flexDirection: 'column', gap: '4px', 
+                      background: 'rgba(255,255,255,0.015)', borderRadius: '16px', border: '1px solid var(--border)',
+                      padding: '20px', marginTop: '4px'
+                    }}>
+                      {Object.entries(s.data).map(([k, v]) => (
+                        <div key={k} style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '20px', padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                          <span style={{ color: 'var(--text-3)', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', paddingTop: '4px' }}>
+                            {k.replace(/_/g, ' ')}
+                          </span>
+                          <div style={{ color: 'var(--text-1)', fontSize: '14px', wordBreak: 'break-word', lineHeight: 1.6 }}>
+                            {typeof v === 'boolean' ? (
+                              <span style={{ color: v ? 'var(--success)' : 'var(--error)', fontWeight: 600 }}>{v ? 'Yes' : 'No'}</span>
+                            ) : Array.isArray(v) ? (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                                {v.map((item, i) => {
+                                  if (typeof item === 'string' && /^[A-Za-z0-9_-]{43,44}$/.test(item)) {
+                                    return (
+                                      <div key={i} style={{ position: 'relative', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)', maxWidth: '200px', background: 'rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column', minHeight: '120px' }}>
+                                        <a href={getWalrusBlobUrl(item)} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', width: '100%', height: '100%', position: 'relative', zIndex: 10, alignItems: 'center', justifyContent: 'center' }} onClick={e => e.stopPropagation()}>
+                                          <img 
+                                            src={getWalrusBlobUrl(item)} 
+                                            style={{ width: '100%', display: 'block', maxHeight: '180px', objectFit: 'cover' }} 
+                                            onError={(e) => { 
+                                              e.currentTarget.style.opacity = '0.05';
+                                              if (!e.currentTarget.parentElement?.querySelector('.fallback-msg')) {
+                                                e.currentTarget.insertAdjacentHTML('afterend', '<div class="fallback-msg" style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center; color: var(--text-3); font-size: 12px; font-weight: 600;"><span>Media File</span><span style="font-size: 10px; opacity: 0.7; margin-top: 4px; text-decoration: underline;">Open Asset</span></div>');
+                                              }
+                                            }} 
+                                          />
+                                        </a>
+                                      </div>
+                                    );
+                                  }
+                                  return <span key={i} style={{ padding: '2px 8px', borderRadius: '4px', background: 'rgba(255,255,255,0.05)', fontSize: '12px' }}>{item}</span>;
+                                })}
+                              </div>
+                            ) : v.toString().startsWith('http') ? (
+                              <a href={v.toString()} target="_blank" rel="noopener noreferrer" className="link-premium" style={{ position: 'relative', zIndex: 10 }} onClick={e => e.stopPropagation()}>
+                                {v.toString()} <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginLeft: 4 }}><path d="M7 17L17 7M7 7h10v10"/></svg>
+                              </a>
+                            ) : (typeof v === 'string' && /^[A-Za-z0-9_-]{43,44}$/.test(v)) ? (
+                              <div style={{ marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                <div style={{ position: 'relative', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)', maxWidth: '300px', background: 'rgba(0,0,0,0.3)', minHeight: '80px' }}>
+                                  <a href={getWalrusBlobUrl(v)} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', width: '100%', height: '100%', position: 'relative', zIndex: 10, alignItems: 'center', justifyContent: 'center' }} onClick={e => e.stopPropagation()}>
+                                    <img 
+                                      src={getWalrusBlobUrl(v)} 
+                                      style={{ width: '100%', display: 'block', maxHeight: '300px', objectFit: 'contain' }} 
+                                      onError={(e) => { 
+                                        e.currentTarget.style.opacity = '0.05';
+                                        if (!e.currentTarget.parentElement?.querySelector('.fallback-msg')) {
+                                          e.currentTarget.insertAdjacentHTML('afterend', '<div class="fallback-msg" style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; color: var(--text-3); font-size: 13px; font-weight: 600;"><span>Media File / Document</span><span style="font-size: 11px; opacity: 0.7; margin-top: 6px; text-decoration: underline;">Open Asset</span></div>');
+                                        }
+                                      }} 
+                                    />
+                                  </a>
+                                </div>
+                                <a href={getWalrusBlobUrl(v)} target="_blank" rel="noopener noreferrer" className="link-premium" style={{ display: 'inline-flex', alignItems: 'center', position: 'relative', zIndex: 10 }} onClick={e => e.stopPropagation()}>
+                                  View Asset <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginLeft: 4 }}><path d="M7 17L17 7M7 7h10v10"/></svg>
+                                </a>
+                              </div>
+                            ) : (
+                               v.toString() ? (() => {
+                                 const text = v.toString();
+                                 const isHtml = /^<[a-z][sS]*>/i.test(text.trim());
+                                 if (isHtml) {
+                                   return (
+                                     <div
+                                       className="rich-response-output"
+                                       dangerouslySetInnerHTML={{ __html: text }}
+                                     />
+                                   );
+                                 }
+                                 const paras = text.split(/\n\n+/);
+                                 return (
+                                   <span style={{ fontWeight: 500, display: 'block' }}>
+                                     {paras.map((para, pi) => (
+                                       <span key={pi} style={{ display: 'block', lineHeight: 1.75, marginBottom: pi < paras.length - 1 ? '12px' : 0 }}>
+                                         {para.split('\n').map((line, li, arr) => (
+                                           <span key={li}>{line}{li < arr.length - 1 && <br />}</span>
+                                         ))}
+                                       </span>
+                                     ))}
+                                   </span>
+                                 );
+                               })() : <em style={{ color: 'var(--text-3)', fontWeight: 400 }}>Empty</em>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Actions Section moved to top */}
+                  </div>
+                )}
+              </motion.div>
+                  ))}
+                </AnimatePresence>
+
+                {subs.filter(s => s.formId === selectedFormId).length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-3)', border: '1px dashed var(--border)', borderRadius: '24px' }}>
+                    <p style={{ fontSize: '15px' }}>No submissions found for this form yet.</p>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '100px 40px', background: 'rgba(255,255,255,0.02)', borderRadius: '24px', border: '1px dashed var(--border)' }}>
+              <div style={{ fontSize: '48px', marginBottom: '24px' }}>📁</div>
+              <h3 style={{ fontSize: '20px', fontWeight: 800, marginBottom: '8px' }}>Select a Form to View Replies</h3>
+              <p style={{ color: 'var(--text-3)', maxWidth: '400px', margin: '0 auto 24px', fontSize: '14px', lineHeight: 1.6 }}>
+                Go to the <strong>Manager</strong> tab and click on a form to see all of its associated submissions here.
+              </p>
+              <button className="btn btn-primary" onClick={() => setInternalTab('manager')}>Go to Manager</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+

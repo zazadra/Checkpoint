@@ -1,0 +1,6 @@
+[package]
+name = "walform"
+version = "0.0.1"
+
+[addresses]
+walform = "0x0"
