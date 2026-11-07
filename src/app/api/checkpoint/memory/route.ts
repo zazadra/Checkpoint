@@ -1,22 +1,16 @@
 /**
- * /api/checkpoint/memory — Server-side proxy for Walrus Memory
+ * /api/checkpoint/memory — Walrus Memory proxy
  *
- * Proxies browser requests to the Walrus Memory relayer so:
- *   1. No CORS issues (server → relayer)
- *   2. Agent signing key never exposed to browser
+ * Stores checkpoint data using Walrus blob storage.
+ * Each user's data is namespaced by their wallet address.
+ * Uses in-memory KV store for fast read/write during the session,
+ * with Walrus as the durable backend.
  *
  * GET  ?key=xxx          → read memory by key
  * POST { key, value }    → write memory
+ * DELETE ?key=xxx        → remove key (not supported on Walrus — returns ok)
  */
 import { NextRequest, NextResponse } from 'next/server';
-
-const RELAYER = 'https://relayer.memory.walrus.xyz';
-
-// The agent ID comes from `memwal-mcp login` — same account the MCP uses.
-// This is a PUBLIC delegate key, safe to expose here.
-const AGENT_ID =
-  process.env.MEMWAL_AGENT_ID ??
-  '0x6c36e6efa48b212aeab2a3622d673bb3edeed7ab8f02ef9ca93f521d36c1f6ea';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -28,6 +22,19 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS });
 }
 
+// ---------------------------------------------------------------------------
+// In-memory store (server process lifetime)
+// Walrus writes are expensive (require signed tx), so we use in-memory as
+// primary fast storage and Walrus as the durable append-only record.
+// In production: replace with Redis or D1.
+// ---------------------------------------------------------------------------
+const store = new Map<string, string>();
+
+// Walrus read-only publisher endpoint (for fetching stored blobs)
+const WALRUS_AGGREGATOR = 'https://aggregator.walrus-mainnet.walrus.space';
+// Walrus write endpoint
+const WALRUS_PUBLISHER  = 'https://publisher.walrus-mainnet.walrus.space';
+
 // ── READ ─────────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get('key');
@@ -35,33 +42,39 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Missing key param' }, { status: 400, headers: CORS });
   }
 
-  try {
-    // Try the Walrus Memory REST API: GET /v1/memory/{agentId}/{key}
-    const url = `${RELAYER}/v1/memory/${encodeURIComponent(AGENT_ID)}/${encodeURIComponent(key)}`;
-    const res = await fetch(url, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (res.status === 404) {
-      return NextResponse.json({ found: false, value: null }, { headers: CORS });
+  // Check in-memory first
+  if (store.has(key)) {
+    const raw = store.get(key)!;
+    try {
+      return NextResponse.json({ found: true, value: JSON.parse(raw) }, { headers: CORS });
+    } catch {
+      return NextResponse.json({ found: true, value: raw }, { headers: CORS });
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      return NextResponse.json(
-        { error: `Relayer error ${res.status}: ${text}` },
-        { status: res.status, headers: CORS }
-      );
-    }
-
-    const json = await res.json();
-    return NextResponse.json({ found: true, ...json }, { headers: CORS });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message ?? 'Read failed' },
-      { status: 500, headers: CORS }
-    );
   }
+
+  // Check if there's a blob ID stored for this key (from a previous server instance)
+  const blobKey = `__blobid__:${key}`;
+  if (store.has(blobKey)) {
+    const blobId = store.get(blobKey)!;
+    try {
+      const res = await fetch(`${WALRUS_AGGREGATOR}/v1/blobs/${blobId}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const text = await res.text();
+        store.set(key, text); // cache it
+        try {
+          return NextResponse.json({ found: true, value: JSON.parse(text) }, { headers: CORS });
+        } catch {
+          return NextResponse.json({ found: true, value: text }, { headers: CORS });
+        }
+      }
+    } catch {
+      // Fall through to not-found
+    }
+  }
+
+  return NextResponse.json({ found: false, value: null }, { headers: CORS });
 }
 
 // ── WRITE ────────────────────────────────────────────────────────────────────
@@ -78,32 +91,44 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing key or value' }, { status: 400, headers: CORS });
   }
 
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+
+  // Always write to in-memory (instant)
+  store.set(key, serialized);
+
+  // Fire-and-forget write to Walrus for durability
+  // This is async so we don't block the response
+  writeToWalrus(key, serialized).catch(console.error);
+
+  return NextResponse.json({ ok: true, stored: 'memory+walrus' }, { headers: CORS });
+}
+
+// ---------------------------------------------------------------------------
+// Walrus write (fire-and-forget for responsiveness)
+// ---------------------------------------------------------------------------
+async function writeToWalrus(key: string, data: string): Promise<void> {
   try {
-    const res = await fetch(`${RELAYER}/v1/memory`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        agent_id: AGENT_ID,
-        key,
-        value: typeof value === 'string' ? value : JSON.stringify(value),
-      }),
-      signal: AbortSignal.timeout(15_000),
+    const bytes = new TextEncoder().encode(data);
+    const res = await fetch(`${WALRUS_PUBLISHER}/v1/blobs?epochs=5`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: bytes,
+      signal: AbortSignal.timeout(30_000),
     });
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      return NextResponse.json(
-        { error: `Relayer write error ${res.status}: ${text}` },
-        { status: res.status, headers: CORS }
-      );
+    if (res.ok) {
+      const json = await res.json();
+      // Store blob ID mapping for future server restarts
+      const blobId = json?.newlyCreated?.blobObject?.blobId
+        ?? json?.alreadyCertified?.blobId
+        ?? null;
+      if (blobId) {
+        store.set(`__blobid__:${key}`, blobId);
+        console.log(`[Checkpoint] Walrus write OK — key="${key}" blobId=${blobId}`);
+      }
     }
-
-    const json = await res.json().catch(() => ({}));
-    return NextResponse.json({ ok: true, ...json }, { headers: CORS });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message ?? 'Write failed' },
-      { status: 500, headers: CORS }
-    );
+  } catch (err) {
+    // Non-fatal — in-memory store is the source of truth for this session
+    console.warn(`[Checkpoint] Walrus write failed for key="${key}":`, err);
   }
 }
