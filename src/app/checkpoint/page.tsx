@@ -11,6 +11,7 @@ import { ProjectCard } from '@/components/checkpoint/ProjectCard';
 import { NewProjectModal } from '@/components/checkpoint/NewProjectModal';
 import { ProjectDetail } from '@/components/checkpoint/ProjectDetail';
 import { WalletGate } from '@/components/checkpoint/WalletGate';
+import { CheckpointBot } from '@/components/checkpoint/CheckpointBot';
 
 const COLOR_OPTIONS = [
   { value: 'violet', label: 'Violet', hex: '#7c3aed' },
@@ -203,6 +204,9 @@ export default function CheckpointPage() {
           />
         )}
       </AnimatePresence>
+
+      {/* ── Floating AI Memory Assistant ── */}
+      {isConnected && <CheckpointBot />}
     </div>
   );
 }
