@@ -1,181 +1,145 @@
-# WalSign 🦭✍️
+# Checkpoint — Work Memory on Walrus
 
-> **Enterprise-grade decentralized document signing and verification platform built on Sui, powered by Tatum RPC and Walrus storage.**  
-> Create multi-party signing requests, store documents securely on Walrus, and resolve addresses instantly via SuiNS (Sui Name Service).
+> **[Total Recall | Tatum × Walrus Memory Hackathon](https://tatum.io/hackathon/total-recall) — Track 02: Smart Agents for Real Life**
 
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
-[![Sui](https://img.shields.io/badge/Sui-Mainnet-4DA2FF?logo=data:image/svg+xml;base64,PHN2Zy8+)](https://sui.io)
-[![Walrus](https://img.shields.io/badge/Walrus-Storage-7C3AED)](https://walrus.xyz)
-[![SuiNS](https://img.shields.io/badge/SuiNS-Domain_Service-blue)](https://suins.io)
-[![Tatum Gateway](https://img.shields.io/badge/Tatum-Enterprise_RPC-teal)](https://tatum.io)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+Checkpoint is a **personal work-context agent** that remembers your sessions so you don't have to. Every time you log what you worked on, what blocked you, and what you decided — it's stored permanently on **Walrus Mainnet** and recalled by an **AI assistant** powered by Walrus Memory.
+
+**Live Demo:** [checkpoint-app.vercel.app](https://checkpoint-app.vercel.app)
+**Repo:** [github.com/zazadra/Checkpoint](https://github.com/zazadra/Checkpoint)
 
 ---
 
-## 💡 What is WalSign?
+## The Problem
 
-**WalSign** is a decentralized, cryptographically secure alternative to traditional doc-signing tools (like DocuSign or HelloSign). Instead of relying on central databases, PDFs and signature trails are fully recorded on-chain.
+Developers lose hours re-establishing context every time they resume work after a break. "What was I doing? Where was I stuck? What did I decide?" — these questions cost real time and mental energy.
 
-### 🌟 Key Features
-- 🔒 **Tamper-Proof Storage** — Upload document PDFs or images directly to **Walrus** (decentralized blob storage).
-- 🤝 **Multi-Party Signing Flow** — Define multiple designated signers for a document using their SUI addresses or **SuiNS domains** (e.g. `alice.sui`).
-- ⚡ **Tatum Enterprise RPC** — High-performance, low-latency Sui Mainnet connection with guaranteed uptime and custom header authorization.
-- 🏷️ **SuiNS Integration** — Resolve `.sui` domains instantly during signer input and display clean primary names on dashboard cards.
-- 🛡️ **Zero-Wallet Public Verification** — Anyone can drop a file on the `/verify` page, calculate its SHA-256 hash in the browser, and match it against WalSign's Sui contract registry.
+## The Solution
+
+Checkpoint logs your sessions in a structured way (mood, current work, blockers, decisions, next steps) and stores them permanently on **Walrus Mainnet**. When you come back, an **AI assistant** (powered by Walrus Memory + Gemini) recalls your history and answers: *"What were you working on last week?"*
 
 ---
 
-## 🏗️ Architecture
+## Tech Stack
 
-```
-                 +-----------------------------------+
-                 |           User Browser            |
-                 +----+-------------------------+----+
-                      |                         |
-        [1] Upload Document Blob         [2] Sign & Create Request
-                      |                         |
-                      v                         v
-           +---------------------+   +---------------------+
-           |    Walrus Storage   |   |   Sui Blockchain    |
-           |   (Blob ID Anchor)  |   | (SigningRequest Obj)|
-           +---------------------+   +----------+----------+
-                                                |
-                                                | [3] Query Events & States
-                                                v
-                                     +---------------------+
-                                     |  Tatum Sui Gateway  |
-                                     +---------------------+
-```
-
-### Flow Breakdown:
-1. **Document Upload**: Documents are securely registered on the **Walrus** decentralized storage network.
-2. **On-chain Anchor**: The creator specifies the Walrus `blob_id`, the SHA-256 `document_hash`, and the list of designated signers. This initiates a shared `SigningRequest` object on Sui.
-3. **Multi-Signatures**: Designated signers connect their wallets, load the document directly from Walrus, and call the Move contract `sign` method to append their signatures.
-4. **Resolution**: All signers' addresses are cross-referenced dynamically via the **Sui Name Service (SuiNS)** client for enhanced clarity and verification.
+| Layer | Technology |
+|---|---|
+| **Persistent Storage** | [Walrus Memory (MemWal)](https://memory.walrus.xyz) — mainnet, 10+ writes per session |
+| **Onchain Data / Balance** | [Tatum RPC](https://tatum.io) — `suix_getBalance`, `suix_getOwnedObjects` |
+| **Wallet Auth** | Sui + Slush Wallet via `@mysten/dapp-kit-react` |
+| **AI Assistant** | Gemini 2.0 Flash + Walrus Memory recall |
+| **Frontend** | Next.js 16, React 19, Tailwind v4, Framer Motion |
+| **Blob Storage** | Walrus Mainnet (direct PUT to publisher) |
 
 ---
 
-## 🛠️ Tech Stack & Integration Details
+## Features
 
-| Layer | Integration | Detail |
-|-------|-------------|--------|
-| **Core Client** | Next.js 16 (Turbopack) | Fast, responsive App Router layout with elegant styling. |
-| **RPC Gateway** | **Tatum Enterprise Sui Node** | Seamless integration via custom request headers with fallback gateways. |
-| **Decentralized Storage** | **Walrus Mainnet** | Dynamic uploads and downloads using official `@mysten/walrus` SDK hooks. |
-| **Domains Service** | **SuiNS (Sui Name Service)** | Bidirectional lookups (names to addresses, and addresses to primary `.sui` names). |
-| **Move Contract** | **Sui Mainnet** | Shared-object architecture with real-time `SignatureEvent` tracking. |
+### 🧠 Session Memory
+Log structured work sessions with:
+- **Mood** (5 levels: 🔥 focused → 😤 frustrated)
+- **Current Work** — what you're building
+- **Blockers** — what's stopping you
+- **Decisions** — what you decided
+- **Next Steps** — where to resume
+
+### 💡 Insight Engine
+Automatically surfaces patterns from your history:
+- Recurring themes (keyword extraction across sessions)
+- Mood trends (happy / frustrated / overwhelmed)
+- Stale session alert (≥2 days since last checkpoint)
+- Top blocker frequency
+
+### 🤖 Checkpoint AI (Walbot Integration)
+Floating AI assistant (bottom-right) that:
+- Recalls your full session history from **Walrus Memory**
+- Answers questions: *"What was I stuck on?"*, *"Summarize last 5 sessions"*
+- Learns new facts from conversations and saves them back to Walrus Memory
+- Powered by Gemini 2.0 Flash + official `@mysten-incubation/memwal` SDK
+
+### 💰 SUI Balance (Tatum RPC)
+Real-time SUI wallet balance displayed on dashboard using Tatum's Sui Mainnet RPC gateway.
 
 ---
 
-## 🚀 Getting Started
+## Walrus Memory Integration
+
+Each checkpoint write triggers **2 Walrus Memory operations**:
+1. **Index write** — full project + all checkpoints index
+2. **Entry write** — individual checkpoint entry
+
+Each chat message with the AI triggers:
+1. **Recall** — semantic search over past sessions
+2. **Remember** — save new insights from the conversation
+
+After 10 checkpoints + 10 AI conversations = **40+ Walrus Memory operations on Mainnet**.
+
+---
+
+## Getting Started
 
 ### Prerequisites
-- Node.js 18+
-- SUI CLI (optional, for deploying your own smart contract)
-- A Sui Mainnet wallet (e.g., Sui Wallet, OKX Wallet) loaded with gas
+- Node.js 20+
+- Slush Wallet browser extension
+- Tatum API key (free at [dashboard.tatum.io](https://dashboard.tatum.io))
+- Gemini API key (free at [aistudio.google.com](https://aistudio.google.com))
+- MemWal credentials (from [memory.walrus.xyz](https://memory.walrus.xyz))
 
-### 1. Installation
-Clone the repository and install the dependencies:
+### Setup
+
 ```bash
-git clone https://github.com/zazadra/Walsign.git
-cd Walsign
+git clone https://github.com/zazadra/Checkpoint.git
+cd Checkpoint
 npm install
 ```
 
-### 2. Configuration
-Create a `.env.local` file in the root directory:
+Create `.env.local`:
 ```env
-# Tatum API Key — get a free key at https://dashboard.tatum.io
-NEXT_PUBLIC_TATUM_API_KEY=your-tatum-api-key-here
-
-# WalSign Move Package ID — update this after publishing:
-NEXT_PUBLIC_WALSIGN_PACKAGE_ID=0xyour-move-package-id-here
-
-# Network Config
+NEXT_PUBLIC_TATUM_API_KEY=your_tatum_api_key
 NEXT_PUBLIC_SUI_NETWORK=mainnet
+
+GEMINI_API_KEY=your_gemini_api_key
+
+MEMWAL_PRIVATE_KEY=your_delegate_private_key
+MEMWAL_ACCOUNT_ID=0x_your_account_id
+MEMWAL_SERVER_URL=https://relayer.memory.walrus.xyz
 ```
 
-### 3. Move Contract Deployment
-To publish the Move smart contract to Sui Mainnet:
-```bash
-cd move/walsign
-sui client publish --gas-budget 100000000
-```
-Capture the **Package ID** from the transaction output and paste it into `NEXT_PUBLIC_WALSIGN_PACKAGE_ID` inside your `.env.local` file.
-
-### 4. Running Locally
-Start the Next.js development server:
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) in your web browser.
+
+Open [http://localhost:3000](http://localhost:3000)
 
 ---
 
-## 💻 Smart Contract Walkthrough
-
-The smart contract is located at `move/walsign/sources/walsign.move`.
-
-### Key Structs & Capabilities
-- **`SigningRequest`**: The shared object holding the signature states.
-  ```move
-  struct SigningRequest has key, store {
-      id: UID,
-      creator: address,
-      title: String,
-      blob_id: String,
-      document_hash: vector<u8>,
-      required_signers: vector<address>,
-      signed_by: vector<address>,
-      created_at: u64,
-      completed: bool,
-      revoked: bool,
-  }
-  ```
-- **`SignatureEvent`**: Emitted on every signature, enabling indexing off-chain.
-  ```move
-  struct SignatureEvent has copy, drop {
-      request_id: ID,
-      signer: address,
-      blob_id: String,
-      timestamp: u64,
-  }
-  ```
-
----
-
-## 📁 Codebase Structure
+## Architecture
 
 ```
-walsign/
-├── move/walsign/           # Sui Move smart contract
-│   ├── Move.toml
-│   └── sources/walsign.move
-│
-├── src/
-│   ├── app/                # Next.js App Router
-│   │   ├── page.tsx        # Dynamic landing page with rich animations
-│   │   ├── create/         # Document sign request creator UI
-│   │   ├── sign/           # Interactive wallet signer interface
-│   │   ├── verify/         # Decentralized, wallet-less file verification page
-│   │   └── dashboard/      # Unified tracking dashboard (Sent & To Sign tabs)
-│   │
-│   ├── lib/                # Core Integration libraries
-│   │   ├── tatum.ts        # Enterprise Tatum RPC client
-│   │   ├── suins.ts        # SuiNS name & reverse-lookup client
-│   │   ├── walsign.ts      # Move interaction layer (Tx builders & hash calculator)
-│   │   └── walrus.ts       # Web3 storage integration helper
-│   │
-│   └── components/         # Premium UI Components
-│       ├── Navbar.tsx      # Glassmorphic header with connect button
-│       └── FeedbackCard.tsx
-└── README.md
+User (Sui Wallet)
+    │
+    ├── POST /api/checkpoint/memory  ──► Walrus Blob PUT (mainnet)
+    │                                   In-memory cache (fast path)
+    │
+    ├── POST /api/chat               ──► Gemini 2.0 Flash
+    │   └── recall/remember          ──► Walrus Memory (MemWal SDK)
+    │
+    └── POST /api/sui-rpc            ──► Tatum RPC Gateway
+        └── suix_getBalance               (SUI balance display)
 ```
 
 ---
 
-## 🤝 Contributing
-Contributions are highly appreciated. Feel free to open issues or submit pull requests.
+## Hackathon Requirements Checklist
 
-## 📄 License
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+- [x] **Walrus Memory on Mainnet** — 10+ writes per user session
+- [x] **Tatum RPC integration** — SUI balance via Tatum gateway
+- [x] **Sui wallet auth** — Slush Wallet via dApp Kit
+- [x] **Working demo** — [checkpoint-app.vercel.app](https://checkpoint-app.vercel.app)
+- [x] **Public repo** — [github.com/zazadra/Checkpoint](https://github.com/zazadra/Checkpoint)
+- [ ] **Blog post** — coming soon
+
+---
+
+## License
+
+MIT

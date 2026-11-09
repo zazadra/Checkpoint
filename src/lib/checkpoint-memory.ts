@@ -223,11 +223,9 @@ export function computeInsights(
 
 export async function getWalletSuiBalance(address: string): Promise<string> {
   try {
-    const { suiRpc } = await import('./tatum');
-    const result = await suiRpc('suix_getBalance', [address, '0x2::sui::SUI']);
-    const mist = BigInt(result?.totalBalance ?? '0');
-    return (Number(mist) / 1_000_000_000).toFixed(3);
+    const { getSuiBalanceViaTatum } = await import('./tatum');
+    return await getSuiBalanceViaTatum(address);
   } catch {
-    return '—';
+    return '0.000';
   }
 }
