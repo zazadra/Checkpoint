@@ -26,27 +26,33 @@ export function CheckpointForm({ projectId, saving, memoryCount, onSave }: Props
   const [nextSteps, setNextSteps] = useState('');
   const [mood, setMood] = useState<SessionMood>('good');
   const [saved, setSaved] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentWork.trim()) return;
-    await onSave({
-      projectId,
-      currentWork: currentWork.trim(),
-      blockers: blockers.trim(),
-      decisions: decisions.trim(),
-      nextSteps: nextSteps.trim(),
-      mood,
-      createdAt: Date.now(),
-    });
-    // Reset
-    setCurrentWork('');
-    setBlockers('');
-    setDecisions('');
-    setNextSteps('');
-    setMood('good');
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    if (!currentWork.trim() || saving) return;
+    setErrorMsg(null);
+    try {
+      await onSave({
+        projectId,
+        currentWork: currentWork.trim(),
+        blockers: blockers.trim(),
+        decisions: decisions.trim(),
+        nextSteps: nextSteps.trim(),
+        mood,
+        createdAt: Date.now(),
+      });
+      // Reset
+      setCurrentWork('');
+      setBlockers('');
+      setDecisions('');
+      setNextSteps('');
+      setMood('good');
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Wallet signing failed.');
+    }
   };
 
   return (
@@ -144,6 +150,21 @@ export function CheckpointForm({ projectId, saving, memoryCount, onSave }: Props
         />
       </div>
 
+      {/* Error Message */}
+      {errorMsg && (
+        <div style={{
+          padding: '10px 14px',
+          borderRadius: 10,
+          background: 'rgba(239, 68, 68, 0.12)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          color: '#f87171',
+          fontSize: 13,
+          lineHeight: 1.4,
+        }}>
+          {errorMsg}
+        </div>
+      )}
+
       {/* Submit */}
       <button
         type="submit"
@@ -152,16 +173,16 @@ export function CheckpointForm({ projectId, saving, memoryCount, onSave }: Props
         style={{ marginTop: 4 }}
       >
         {saving ? (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
             <span className="spinner" />
-            Writing to Walrus Memory…
+            Approving & Committing to Walrus…
           </span>
         ) : saved ? (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            ✓ Checkpoint saved on Walrus
+          <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+            ✓ Checkpoint Signed & Saved
           </span>
         ) : (
-          '💾 Save Checkpoint'
+          '✍️ Sign & Commit Checkpoint'
         )}
       </button>
 

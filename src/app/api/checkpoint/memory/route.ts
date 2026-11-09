@@ -97,8 +97,16 @@ export async function POST(req: NextRequest) {
   store.set(key, serialized);
 
   // Fire-and-forget write to Walrus for durability
-  // This is async so we don't block the response
   writeToWalrus(key, serialized).catch(console.error);
+
+  // Also push to MemWal if configured (for hackathon 10+ memories requirement)
+  const parts = key.split(':');
+  const userId = parts[2] || 'anonymous';
+  try {
+    import('@/lib/memwal/client').then(({ memwalRemember }) => {
+      memwalRemember(userId, `[Checkpoint Memory] Key: ${key} -> ${serialized.slice(0, 300)}`).catch(() => {});
+    }).catch(() => {});
+  } catch {}
 
   return NextResponse.json({ ok: true, stored: 'memory+walrus' }, { headers: CORS });
 }

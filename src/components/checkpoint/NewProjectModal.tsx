@@ -23,11 +23,17 @@ export function NewProjectModal({ saving, onClose, onSave }: Props) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [color, setColor] = useState<ProjectColor>('violet');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
-    await onSave({ name: name.trim(), description: description.trim(), color });
+    if (!name.trim() || saving) return;
+    setErrorMsg(null);
+    try {
+      await onSave({ name: name.trim(), description: description.trim(), color });
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Wallet signing rejected or failed.');
+    }
   };
 
   return (
@@ -117,6 +123,21 @@ export function NewProjectModal({ saving, onClose, onSave }: Props) {
             </div>
           </div>
 
+          {/* Error Message */}
+          {errorMsg && (
+            <div style={{
+              padding: '10px 14px',
+              borderRadius: 10,
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              color: '#f87171',
+              fontSize: 13,
+              lineHeight: 1.4,
+            }}>
+              {errorMsg}
+            </div>
+          )}
+
           {/* Actions */}
           <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
             <button
@@ -131,14 +152,14 @@ export function NewProjectModal({ saving, onClose, onSave }: Props) {
               type="submit"
               className="btn btn-primary"
               disabled={!name.trim() || saving}
-              style={{ flex: 1 }}
+              style={{ flex: 1.4 }}
             >
               {saving ? (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className="spinner" /> Saving…
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <span className="spinner" /> Approving in Wallet…
                 </span>
               ) : (
-                'Create Project'
+                '✍️ Sign & Create Project'
               )}
             </button>
           </div>

@@ -17,6 +17,7 @@ export interface Project {
   color: ProjectColor;
   createdAt: number;      // unix ms
   updatedAt: number;
+  signature?: string;     // cryptographic signature from Sui wallet
 }
 
 export type ProjectColor =
@@ -45,6 +46,7 @@ export interface CheckpointEntry {
   // Walrus storage references
   blobId?: string;        // set after write to Walrus Mainnet
   walrusTxDigest?: string;
+  signature?: string;     // cryptographic signature from Sui wallet
 }
 
 export type SessionMood = 'great' | 'good' | 'meh' | 'stuck' | 'blocked';

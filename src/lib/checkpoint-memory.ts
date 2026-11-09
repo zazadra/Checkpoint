@@ -23,27 +23,61 @@ import { MEMORY_KEYS } from './checkpoint-types';
 // ---------------------------------------------------------------------------
 
 async function memGet<T>(key: string): Promise<T | null> {
-  const res = await fetch(`/api/checkpoint/memory?key=${encodeURIComponent(key)}`);
-  if (!res.ok) throw new Error(`Memory read failed: ${res.status}`);
-  const json = await res.json();
-  if (!json.found || json.value == null) return null;
-  const raw = json.value;
-  try {
-    return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
-  } catch {
-    return raw as T;
+  let localValue: T | null = null;
+  if (typeof window !== 'undefined') {
+    try {
+      const local = localStorage.getItem(key);
+      if (local) {
+        localValue = JSON.parse(local) as T;
+      }
+    } catch {
+      // Ignore localStorage parse errors
+    }
   }
+
+  try {
+    const res = await fetch(`/api/checkpoint/memory?key=${encodeURIComponent(key)}`);
+    if (res.ok) {
+      const json = await res.json();
+      if (json.found && json.value != null) {
+        const serverValue = (typeof json.value === 'string' ? JSON.parse(json.value) : json.value) as T;
+        // If we also had localValue, return whichever has latest lastUpdated if available
+        if (localValue && typeof localValue === 'object' && 'lastUpdated' in (localValue as any)) {
+          const lTime = (localValue as any).lastUpdated ?? 0;
+          const sTime = (serverValue as any)?.lastUpdated ?? 0;
+          return sTime > lTime ? serverValue : localValue;
+        }
+        return serverValue;
+      }
+    }
+  } catch (err) {
+    console.warn('[Checkpoint] Server memory read failed, falling back to local:', err);
+  }
+
+  return localValue;
 }
 
 async function memSet(key: string, value: unknown): Promise<void> {
-  const res = await fetch('/api/checkpoint/memory', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, value }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error ?? `Memory write failed: ${res.status}`);
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+
+  // 1. Immediately persist to browser localStorage so refresh NEVER loses data
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(key, serialized);
+    } catch (e) {
+      console.warn('[Checkpoint] localStorage write warning:', e);
+    }
+  }
+
+  // 2. Sync to server proxy & Walrus Memory durable backend
+  try {
+    await fetch('/api/checkpoint/memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+  } catch (err) {
+    console.warn('[Checkpoint] Remote memory write failed (local saved):', err);
   }
 }
 

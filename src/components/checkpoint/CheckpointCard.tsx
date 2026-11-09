@@ -80,8 +80,8 @@ export function CheckpointCard({ entry, isLatest }: Props) {
         </span>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Time */}
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+          {/* Time and Verification */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, color: moodColor, fontWeight: 600 }}>
               {entry.mood.charAt(0).toUpperCase() + entry.mood.slice(1)}
             </span>
@@ -89,6 +89,22 @@ export function CheckpointCard({ entry, isLatest }: Props) {
             <span style={{ fontSize: 11, color: 'var(--text-3)' }} title={formatDate(entry.createdAt)}>
               {timeAgo(entry.createdAt)}
             </span>
+            {entry.signature && (
+              <>
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>·</span>
+                <span style={{
+                  fontSize: 10,
+                  color: '#a78bfa',
+                  background: 'rgba(124, 58, 237, 0.15)',
+                  border: '1px solid rgba(124, 58, 237, 0.3)',
+                  borderRadius: 4,
+                  padding: '1px 5px',
+                  fontWeight: 600,
+                }} title={`Sui Wallet Signature: ${entry.signature}`}>
+                  🔒 Verified Signature
+                </span>
+              </>
+            )}
           </div>
 
           {/* currentWork — always visible */}

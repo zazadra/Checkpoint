@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useWalletConnection } from './useWalletConnection';
+import { dAppKit } from '@/app/dapp-kit';
 import {
   loadCheckpointIndex,
   saveCheckpoint,
@@ -69,13 +70,28 @@ export function useCheckpoints() {
     }
   }, [isConnected, address, refresh, fetchBalance]);
 
-  /** Create a new project */
+  /** Create a new project with wallet signature approval */
   const addProject = useCallback(
     async (project: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>) => {
       if (!address) throw new Error('Wallet not connected');
       setSaving(true);
+      setError(null);
       try {
-        const created = await createProject(address, project);
+        // ── 1. Prompt Wallet Approval Popup ──────────────────────────
+        let signature: string | undefined;
+        try {
+          const msg = new TextEncoder().encode(
+            `Checkpoint: Create Project\nName: ${project.name}\nOwner: ${address}\nTimestamp: ${new Date().toISOString()}`
+          );
+          const signed = await dAppKit.signPersonalMessage({ message: msg });
+          signature = signed.signature;
+        } catch (walletErr: any) {
+          console.warn('[Checkpoint] Wallet signing prompt cancelled or failed:', walletErr);
+          throw new Error('Wallet approval required to create project. Please sign the request in your wallet.');
+        }
+
+        // ── 2. Persist project with cryptographic signature ──────────
+        const created = await createProject(address, { ...project, signature });
         await refresh();
         return created;
       } finally {
@@ -85,13 +101,28 @@ export function useCheckpoints() {
     [address, refresh]
   );
 
-  /** Save a new checkpoint entry */
+  /** Save a new checkpoint entry with wallet signature approval */
   const addCheckpoint = useCallback(
     async (entry: Omit<CheckpointEntry, 'id' | 'walrusOwner' | 'blobId'>) => {
       if (!address) throw new Error('Wallet not connected');
       setSaving(true);
+      setError(null);
       try {
-        const saved = await saveCheckpoint(address, entry);
+        // ── 1. Prompt Wallet Approval Popup ──────────────────────────
+        let signature: string | undefined;
+        try {
+          const msg = new TextEncoder().encode(
+            `Checkpoint: Log Session\nMood: ${entry.mood}\nTask: ${entry.currentWork.slice(0, 100)}\nOwner: ${address}\nTimestamp: ${new Date().toISOString()}`
+          );
+          const signed = await dAppKit.signPersonalMessage({ message: msg });
+          signature = signed.signature;
+        } catch (walletErr: any) {
+          console.warn('[Checkpoint] Wallet signing prompt cancelled or failed:', walletErr);
+          throw new Error('Wallet approval required to commit checkpoint. Please sign the request in your wallet.');
+        }
+
+        // ── 2. Persist checkpoint with cryptographic signature ────────
+        const saved = await saveCheckpoint(address, { ...entry, signature });
         await refresh();
         return saved;
       } finally {
