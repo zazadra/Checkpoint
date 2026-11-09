@@ -4,19 +4,19 @@ import { ClientProviders } from '@/components/providers/ClientProviders';
 import { NavbarWrapper } from '@/components/NavbarWrapper';
 
 export const metadata: Metadata = {
-  title: 'WalSign — The Verifiable Trust Layer',
-  description: 'Proof that lives forever. Every artifact, agreement, and AI output — cryptographically signed, permanently stored on Walrus, and instantly verifiable on Sui.',
-  keywords: ['WalSign', 'Sui', 'Walrus', 'verifiable trust', 'AI verification', 'blockchain proof', 'decentralized signing', 'cryptographic evidence'],
+  title: 'Checkpoint — Work Memory on Walrus',
+  description: 'Your personal work context agent. Log sessions, recall decisions, surface patterns — all stored permanently on Walrus Memory with Sui wallet auth.',
+  keywords: ['Checkpoint', 'Walrus Memory', 'Sui', 'Tatum', 'work journal', 'AI memory', 'Web3 productivity', 'decentralized storage'],
   openGraph: {
-    title: 'WalSign — The Trust Layer for Humans and AI',
-    description: 'Cryptographic proof infrastructure. Permanently stored on Walrus. Verified on Sui. Built for the AI era.',
+    title: 'Checkpoint — Work Memory on Walrus',
+    description: 'Log your work sessions. Never lose context again. Powered by Walrus Memory, Sui, and Tatum RPC.',
     type: 'website',
-    siteName: 'WalSign',
+    siteName: 'Checkpoint',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'WalSign — Proof that lives forever.',
-    description: 'The verifiable trust layer for humans, teams, and AI agents. Powered by Walrus + Sui.',
+    title: 'Checkpoint — Work Memory on Walrus',
+    description: 'Your AI-powered work context agent. Sessions stored on Walrus. Recalled by AI. Built for builders.',
   },
 };
 
