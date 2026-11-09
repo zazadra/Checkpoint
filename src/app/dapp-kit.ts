@@ -12,7 +12,10 @@ export const dAppKit = createDAppKit({
   networks: ['mainnet'],
   defaultNetwork: 'mainnet',
   createClient: createSuiClient as any, // Cast due to type differences in v2
-  slushWalletConfig: { appName: 'WalSign — Decentralized Document Signing' },
+  slushWalletConfig: {
+    appName: 'Checkpoint — Work Memory on Walrus',
+    appIconUrl: 'https://checkpoint-app.vercel.app/logo.png',
+  },
 });
 
 // Register types for hook type inference
