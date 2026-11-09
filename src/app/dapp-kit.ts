@@ -13,8 +13,7 @@ export const dAppKit = createDAppKit({
   defaultNetwork: 'mainnet',
   createClient: createSuiClient as any, // Cast due to type differences in v2
   slushWalletConfig: {
-    appName: 'Checkpoint — Work Memory on Walrus',
-    appIconUrl: 'https://checkpoint-app.vercel.app/logo.png',
+    appName: 'Checkpoint',
   },
 });
 
