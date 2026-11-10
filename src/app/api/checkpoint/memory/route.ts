@@ -99,12 +99,34 @@ export async function POST(req: NextRequest) {
   // Fire-and-forget write to Walrus for durability
   writeToWalrus(key, serialized).catch(console.error);
 
-  // Also push to MemWal if configured (for hackathon 10+ memories requirement)
+  // Push structured memories to Walrus Memory (MemWal)
   const parts = key.split(':');
   const userId = parts[2] || 'anonymous';
   try {
     import('@/lib/memwal/client').then(({ memwalRemember }) => {
-      memwalRemember(userId, `[Checkpoint Memory] Key: ${key} -> ${serialized.slice(0, 300)}`).catch(() => {});
+      let parsedVal: any = null;
+      try {
+        parsedVal = typeof value === 'string' ? JSON.parse(value) : value;
+      } catch {}
+
+      if (parsedVal && typeof parsedVal === 'object') {
+        if ('projects' in parsedVal && Array.isArray(parsedVal.projects)) {
+          // Index write: remember all recent projects
+          const latestProj = parsedVal.projects[parsedVal.projects.length - 1];
+          if (latestProj) {
+            memwalRemember(
+              userId,
+              `[Checkpoint Project] Name: "${latestProj.name}". Description: "${latestProj.description || 'None'}". Color: ${latestProj.color}. Owner: ${userId}.`
+            ).catch(() => {});
+          }
+        } else if ('currentWork' in parsedVal) {
+          // Single entry write
+          memwalRemember(
+            userId,
+            `[Work Session] Project ID: ${parsedVal.projectId}. Mood: ${parsedVal.mood}. Work: "${parsedVal.currentWork}". Blockers: "${parsedVal.blockers || 'none'}". Decisions: "${parsedVal.decisions || 'none'}". Next: "${parsedVal.nextSteps || 'none'}".`
+          ).catch(() => {});
+        }
+      }
     }).catch(() => {});
   } catch {}
 

@@ -1,23 +1,50 @@
 /**
  * MemWal client — official @mysten-incubation/memwal SDK
- * Identical to Walbot-AI — just imported here for Checkpoint.
+ * Checkpoint Integration for Walrus Memory
  *
- * Env vars (set in Vercel):
+ * Env vars (set in Vercel & .env.local):
  *   MEMWAL_PRIVATE_KEY  — delegate private key (from memwal-mcp login)
  *   MEMWAL_ACCOUNT_ID   — account object ID (0x...)
  *   MEMWAL_SERVER_URL   — https://relayer.memory.walrus.xyz
  */
 
 import { MemWal } from '@mysten-incubation/memwal';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 let _client: MemWal | null = null;
 
-function getClient(): MemWal {
+export function isMemWalConfigured(): boolean {
+  try {
+    getClient();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function getClient(): MemWal {
   if (_client) return _client;
 
-  const key       = process.env.MEMWAL_PRIVATE_KEY ?? '';
-  const accountId = process.env.MEMWAL_ACCOUNT_ID  ?? '';
-  const serverUrl = process.env.MEMWAL_SERVER_URL  ?? 'https://relayer.memory.walrus.xyz';
+  let key       = process.env.MEMWAL_PRIVATE_KEY ?? '';
+  let accountId = process.env.MEMWAL_ACCOUNT_ID  ?? '';
+  let serverUrl = process.env.MEMWAL_SERVER_URL  ?? 'https://relayer.memory.walrus.xyz';
+
+  // Fallback to local ~/.memwal/credentials.json if env vars are missing
+  if (!key || !accountId) {
+    try {
+      const credPath = path.join(os.homedir(), '.memwal', 'credentials.json');
+      if (fs.existsSync(credPath)) {
+        const c = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+        key = key || c.delegatePrivateKey || '';
+        accountId = accountId || c.accountId || '';
+        serverUrl = serverUrl || c.relayerUrl || 'https://relayer.memory.walrus.xyz';
+      }
+    } catch {
+      // Ignore filesystem read errors in restricted environments
+    }
+  }
 
   if (!key || !accountId) {
     throw new Error('MemWal: MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID must be set.');
@@ -45,16 +72,22 @@ export async function memwalRecall(
 }
 
 /** Save a new memory for a user namespace (fire-and-forget safe). */
-export async function memwalRemember(userId: string, text: string): Promise<void> {
+export async function memwalRemember(userId: string, text: string): Promise<string | null> {
   try {
     const memwal = getClient();
     const job = await memwal.remember(text, userId);
     if (job?.job_id) {
-      memwal.waitForRememberJob(job.job_id).catch((e: unknown) =>
+      console.log(`[MemWal] Remember job queued: ${job.job_id} for ${userId}`);
+      memwal.waitForRememberJob(job.job_id).then((res: any) => {
+        console.log(`[MemWal] Remember completed! Blob ID:`, res?.blob_id || res?.blobId);
+      }).catch((e: unknown) =>
         console.error('[MemWal] waitForRememberJob error:', e),
       );
+      return job.job_id;
     }
+    return null;
   } catch (err) {
     console.error('[MemWal] remember error:', err);
+    return null;
   }
 }
