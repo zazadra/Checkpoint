@@ -1,16 +1,16 @@
 /**
- * /api/checkpoint/memory — Walrus Memory proxy
+ * /api/checkpoint/memory — Cross-Device Walrus Memory Backend
  *
- * Stores checkpoint data using Walrus blob storage.
- * Each user's data is namespaced by their wallet address.
- * Uses in-memory KV store for fast read/write during the session,
- * with Walrus as the durable backend.
+ * Provides persistent read & write across devices (laptop, mobile, tablet)
+ * anchored to the user's Sui wallet address via Walrus Memory (MemWal SDK).
  *
- * GET  ?key=xxx          → read memory by key
- * POST { key, value }    → write memory
- * DELETE ?key=xxx        → remove key (not supported on Walrus — returns ok)
+ * GET  ?key=checkpoint:index:<address>   → Loads state from memory or reconstructs from MemWal
+ * POST { key, value }                    → Persists state & commits onchain to Walrus Memory
  */
+
 import { NextRequest, NextResponse } from 'next/server';
+
+export const runtime = 'nodejs';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -22,62 +22,86 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS });
 }
 
-// ---------------------------------------------------------------------------
-// In-memory store (server process lifetime)
-// Walrus writes are expensive (require signed tx), so we use in-memory as
-// primary fast storage and Walrus as the durable append-only record.
-// In production: replace with Redis or D1.
-// ---------------------------------------------------------------------------
+// Global in-memory cache for fast read within active lambda
 const store = new Map<string, string>();
 
-// Walrus read-only publisher endpoint (for fetching stored blobs)
-const WALRUS_AGGREGATOR = 'https://aggregator.walrus-mainnet.walrus.space';
-// Walrus write endpoint
-const WALRUS_PUBLISHER  = 'https://publisher.walrus-mainnet.walrus.space';
-
-// ── READ ─────────────────────────────────────────────────────────────────────
+// ── READ (Supports Cross-Device Mobile & Fresh Cold Starts) ──────────────────
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get('key');
   if (!key) {
     return NextResponse.json({ error: 'Missing key param' }, { status: 400, headers: CORS });
   }
 
-  // Check in-memory first
+  // 1. Check in-memory fast cache
   if (store.has(key)) {
     const raw = store.get(key)!;
     try {
-      return NextResponse.json({ found: true, value: JSON.parse(raw) }, { headers: CORS });
+      return NextResponse.json({ found: true, value: JSON.parse(raw), source: 'cache' }, { headers: CORS });
     } catch {
-      return NextResponse.json({ found: true, value: raw }, { headers: CORS });
+      return NextResponse.json({ found: true, value: raw, source: 'cache' }, { headers: CORS });
     }
   }
 
-  // Check if there's a blob ID stored for this key (from a previous server instance)
-  const blobKey = `__blobid__:${key}`;
-  if (store.has(blobKey)) {
-    const blobId = store.get(blobKey)!;
+  // 2. Cross-Device Walrus Memory Recovery: Query MemWal
+  const parts = key.split(':');
+  // key format is checkpoint:index:<address>
+  const address = parts[2];
+
+  if (address && address.startsWith('0x')) {
     try {
-      const res = await fetch(`${WALRUS_AGGREGATOR}/v1/blobs/${blobId}`, {
-        signal: AbortSignal.timeout(8000),
-      });
-      if (res.ok) {
-        const text = await res.text();
-        store.set(key, text); // cache it
-        try {
-          return NextResponse.json({ found: true, value: JSON.parse(text) }, { headers: CORS });
-        } catch {
-          return NextResponse.json({ found: true, value: text }, { headers: CORS });
+      const { memwalRecall } = await import('@/lib/memwal/client');
+      // Recall all checkpoint and project data for this user's wallet address
+      const rawMemories = await memwalRecall(address, 'CHECKPOINT_PROJECT_JSON CHECKPOINT_ENTRY_JSON', 50);
+
+      if (rawMemories && rawMemories.length > 0) {
+        const recoveredProjects: any[] = [];
+        const recoveredCheckpoints: any[] = [];
+
+        const lines = rawMemories.split('\n');
+        for (const line of lines) {
+          try {
+            if (line.includes('[CHECKPOINT_PROJECT_JSON]:')) {
+              const jsonStr = line.slice(line.indexOf('{'));
+              const proj = JSON.parse(jsonStr);
+              if (proj.id && !recoveredProjects.some((p) => p.id === proj.id)) {
+                recoveredProjects.push(proj);
+              }
+            } else if (line.includes('[CHECKPOINT_ENTRY_JSON]:')) {
+              const jsonStr = line.slice(line.indexOf('{'));
+              const entry = JSON.parse(jsonStr);
+              if (entry.id && !recoveredCheckpoints.some((c) => c.id === entry.id)) {
+                recoveredCheckpoints.push(entry);
+              }
+            }
+          } catch {
+            // Ignore parse errors on individual lines
+          }
+        }
+
+        if (recoveredProjects.length > 0 || recoveredCheckpoints.length > 0) {
+          const recoveredIndex = {
+            version: 1,
+            projects: recoveredProjects,
+            checkpoints: recoveredCheckpoints,
+            lastUpdated: Date.now(),
+          };
+          store.set(key, JSON.stringify(recoveredIndex));
+          console.log(`[MemWal Sync] Reconstructed ${recoveredProjects.length} projects & ${recoveredCheckpoints.length} checkpoints for ${address}`);
+          return NextResponse.json(
+            { found: true, value: recoveredIndex, source: 'walrus-memwal' },
+            { headers: CORS }
+          );
         }
       }
-    } catch {
-      // Fall through to not-found
+    } catch (err) {
+      console.warn('[MemWal Sync] Cross-device recall error:', err);
     }
   }
 
   return NextResponse.json({ found: false, value: null }, { headers: CORS });
 }
 
-// ── WRITE ────────────────────────────────────────────────────────────────────
+// ── WRITE (Commits On-Chain to Walrus Memory via MemWal) ─────────────────────
 export async function POST(req: NextRequest) {
   let body: { key?: string; value?: unknown };
   try {
@@ -93,17 +117,16 @@ export async function POST(req: NextRequest) {
 
   const serialized = typeof value === 'string' ? value : JSON.stringify(value);
 
-  // Always write to in-memory (instant)
+  // 1. Immediately store in server cache
   store.set(key, serialized);
 
-  // Fire-and-forget write to Walrus for durability
-  writeToWalrus(key, serialized).catch(console.error);
-
-  // Push structured memories to Walrus Memory (MemWal)
+  // 2. Commit on-chain to Walrus Memory (MemWal)
   const parts = key.split(':');
-  const userId = parts[2] || 'anonymous';
-  try {
-    import('@/lib/memwal/client').then(({ memwalRemember }) => {
+  const address = parts[2];
+
+  if (address && address.startsWith('0x')) {
+    try {
+      const { memwalRemember } = await import('@/lib/memwal/client');
       let parsedVal: any = null;
       try {
         parsedVal = typeof value === 'string' ? JSON.parse(value) : value;
@@ -111,54 +134,27 @@ export async function POST(req: NextRequest) {
 
       if (parsedVal && typeof parsedVal === 'object') {
         if ('projects' in parsedVal && Array.isArray(parsedVal.projects)) {
-          // Index write: remember all recent projects
-          const latestProj = parsedVal.projects[parsedVal.projects.length - 1];
-          if (latestProj) {
-            memwalRemember(
-              userId,
-              `[Checkpoint Project] Name: "${latestProj.name}". Description: "${latestProj.description || 'None'}". Color: ${latestProj.color}. Owner: ${userId}.`
-            ).catch(() => {});
+          // Index write — save all projects
+          for (const proj of parsedVal.projects) {
+            const payload = `[CHECKPOINT_PROJECT_JSON]: ${JSON.stringify(proj)}`;
+            await memwalRemember(address, payload);
+          }
+          if (Array.isArray(parsedVal.checkpoints)) {
+            for (const chk of parsedVal.checkpoints) {
+              const payload = `[CHECKPOINT_ENTRY_JSON]: ${JSON.stringify(chk)}`;
+              await memwalRemember(address, payload);
+            }
           }
         } else if ('currentWork' in parsedVal) {
-          // Single entry write
-          memwalRemember(
-            userId,
-            `[Work Session] Project ID: ${parsedVal.projectId}. Mood: ${parsedVal.mood}. Work: "${parsedVal.currentWork}". Blockers: "${parsedVal.blockers || 'none'}". Decisions: "${parsedVal.decisions || 'none'}". Next: "${parsedVal.nextSteps || 'none'}".`
-          ).catch(() => {});
+          // Single checkpoint entry
+          const payload = `[CHECKPOINT_ENTRY_JSON]: ${JSON.stringify(parsedVal)}`;
+          await memwalRemember(address, payload);
         }
       }
-    }).catch(() => {});
-  } catch {}
-
-  return NextResponse.json({ ok: true, stored: 'memory+walrus' }, { headers: CORS });
-}
-
-// ---------------------------------------------------------------------------
-// Walrus write (fire-and-forget for responsiveness)
-// ---------------------------------------------------------------------------
-async function writeToWalrus(key: string, data: string): Promise<void> {
-  try {
-    const bytes = new TextEncoder().encode(data);
-    const res = await fetch(`${WALRUS_PUBLISHER}/v1/blobs?epochs=5`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: bytes,
-      signal: AbortSignal.timeout(30_000),
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      // Store blob ID mapping for future server restarts
-      const blobId = json?.newlyCreated?.blobObject?.blobId
-        ?? json?.alreadyCertified?.blobId
-        ?? null;
-      if (blobId) {
-        store.set(`__blobid__:${key}`, blobId);
-        console.log(`[Checkpoint] Walrus write OK — key="${key}" blobId=${blobId}`);
-      }
+    } catch (memErr) {
+      console.error('[MemWal] Onchain sync write error:', memErr);
     }
-  } catch (err) {
-    // Non-fatal — in-memory store is the source of truth for this session
-    console.warn(`[Checkpoint] Walrus write failed for key="${key}":`, err);
   }
+
+  return NextResponse.json({ ok: true, stored: 'memwal+walrus' }, { headers: CORS });
 }

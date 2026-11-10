@@ -22,6 +22,29 @@ import { MEMORY_KEYS } from './checkpoint-types';
 // Low-level read / write via API proxy
 // ---------------------------------------------------------------------------
 
+function mergeIndices(local: any, remote: any): any {
+  if (!local) return remote;
+  if (!remote) return local;
+  if (!local.projects && !remote.projects) return remote || local;
+
+  const projectMap = new Map<string, any>();
+  for (const p of [...(remote?.projects || []), ...(local?.projects || [])]) {
+    if (p && p.id) projectMap.set(p.id, p);
+  }
+
+  const checkpointMap = new Map<string, any>();
+  for (const c of [...(remote?.checkpoints || []), ...(local?.checkpoints || [])]) {
+    if (c && c.id) checkpointMap.set(c.id, c);
+  }
+
+  return {
+    version: 1,
+    projects: Array.from(projectMap.values()),
+    checkpoints: Array.from(checkpointMap.values()),
+    lastUpdated: Math.max(local?.lastUpdated || 0, remote?.lastUpdated || 0, Date.now()),
+  };
+}
+
 async function memGet<T>(key: string): Promise<T | null> {
   let localValue: T | null = null;
   if (typeof window !== 'undefined') {
@@ -41,13 +64,15 @@ async function memGet<T>(key: string): Promise<T | null> {
       const json = await res.json();
       if (json.found && json.value != null) {
         const serverValue = (typeof json.value === 'string' ? JSON.parse(json.value) : json.value) as T;
-        // If we also had localValue, return whichever has latest lastUpdated if available
-        if (localValue && typeof localValue === 'object' && 'lastUpdated' in (localValue as any)) {
-          const lTime = (localValue as any).lastUpdated ?? 0;
-          const sTime = (serverValue as any)?.lastUpdated ?? 0;
-          return sTime > lTime ? serverValue : localValue;
+        const merged = mergeIndices(localValue, serverValue) as T;
+
+        // Cache the merged data on the current device (e.g. mobile)
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem(key, JSON.stringify(merged));
+          } catch {}
         }
-        return serverValue;
+        return merged;
       }
     }
   } catch (err) {
